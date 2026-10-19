@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sports image sorter · レビュー</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header><div><span class="eyebrow">SPORTS IMAGE SORTER</span><h1>画像を確認する</h1><p>競技用具・会場・動作を確認し、曖昧な写真は「未分類」にしてください。</p></div><span class="local">ローカル保存</span></header>
+<main>
+  <div id="summary" class="summary" aria-live="polite">読み込み中です。</div>
+  <section class="filters" aria-label="絞り込み">
+    <label>競技<select id="filter-label"><option value="">すべての競技</option></select></label>
+    <label>確認対象<select id="filter-mode"><option value="all">すべての画像</option><option value="unknown">未分類</option><option value="disagreement">モデル間の不一致</option><option value="unreviewed">未レビュー</option><option value="error">読み込み・推論エラー</option></select></label>
+    <button id="select-page" class="secondary">このページを選択</button><button id="clear" class="text">選択解除</button>
+    <span id="count"></span>
+  </section>
+  <section class="bulk" aria-label="分類の修正">
+    <strong id="selected">0件選択</strong>
+    <label>修正先<input id="review-label" list="labels" value="未分類" maxlength="50"><datalist id="labels"></datalist></label>
+    <label class="reason">目視の根拠<input id="evidence" placeholder="例：ラケットとシャトル、ネットが見える" maxlength="2000"></label>
+    <label class="check"><input id="gold" type="checkbox">人が画像を確認した正解ラベルとして保存</label>
+    <button id="save" disabled>分類を保存</button>
+  </section>
+  <p class="hint">サムネイルを押すと拡大します。修正は台帳に保存されます。出力への反映はCLIの copy を再実行してください。</p>
+  <div id="message" role="status" aria-live="polite"></div>
+  <section id="grid" class="grid" aria-label="画像一覧"></section>
+  <nav class="pagination" aria-label="ページ"><button id="prev" class="secondary">前へ</button><span id="page"></span><button id="next" class="secondary">次へ</button></nav>
+</main>
+<dialog id="detail"><button id="close-detail" class="secondary">閉じる</button><img id="detail-image" alt="確認する画像"><p id="detail-text"></p></dialog>
+<script src="/app.js"></script>
+</body></html>

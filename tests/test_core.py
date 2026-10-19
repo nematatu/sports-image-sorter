@@ -28,6 +28,33 @@ class FixedEngine:
 
 
 class CoreTests(unittest.TestCase):
+    def test_cli_rejects_database_inside_input_before_creation(self):
+        from sports_sorter.cli import main
+        path = self.source / "state.sqlite"
+        self.assertEqual(main(["--db", str(path), "scan", str(self.source)]), 2)
+        self.assertFalse(path.exists())
+
+    def test_failed_inference_is_not_correct_unknown(self):
+        self.image()
+        scan(self.source, self.db)
+        engine = FixedEngine()
+        with patch.object(engine, "classify", side_effect=TimeoutError):
+            classify(self.db, engine)
+        set_reviews(self.db, [1], "未分類", human_verified=True)
+        result = summary(self.db)["accuracy"]
+        self.assertEqual(result["correct"], 0)
+        self.assertIsNone(result["value"])
+        self.assertEqual(result["reviewed_inference_failures"], 1)
+
+    def test_rescan_recovers_temporary_decode_failure(self):
+        self.image()
+        with patch("sports_sorter.core.load_pixels", side_effect=OSError):
+            self.assertEqual(scan(self.source, self.db)["decode_errors"], 1)
+        self.assertEqual(scan(self.source, self.db)["decodable"], 1)
+        engine = FixedEngine()
+        self.assertEqual(classify(self.db, engine)["processed"], 1)
+        self.assertEqual(effective_rows(self.db)[0]["decode_status"], "ok")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()

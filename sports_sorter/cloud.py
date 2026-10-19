@@ -21,19 +21,27 @@ from PIL import Image
 
 from .core import LABELS, Database, Prediction, classify, protected_path
 
-MODEL = "gemini-2.5-flash-lite"
+MODEL = "gemini-3.5-flash-lite"
 INPUT_LIMIT = 32_000
 OUTPUT_LIMIT = 512
 NANODOLLARS = 1_000_000_000
-RESERVATION = INPUT_LIMIT * 100 + OUTPUT_LIMIT * 400
-POLICY = "visual-sport-gemini-v1"
+INPUT_RATE = 300
+OUTPUT_RATE = 2500
+RESERVATION = INPUT_LIMIT * INPUT_RATE + OUTPUT_LIMIT * OUTPUT_RATE
+POLICY = "visual-sport-gemini-v2"
 PROMPT = """Classify the visible sporting activity in this image using equipment, court or venue,
 uniforms, sporting actions and event signage. Never identify people or infer a sport from
 appearance, athlete identity, nationality or fame. Return 未分類 for portraits, face closeups,
 ordinary clothes, awards/podium/ceremonies, no visible sporting context, multiple plausible
 sports, or uncertainty. A uniform alone is insufficient. Other clearly identifiable sports
 outside the listed categories use その他の競技. is_sport_context must be false for any excluded
-scene. Give only short visible evidence, no names or personal information. score is your
+scene. A studio or posed promotional photo is excluded even if a racket is visible.
+Indoor flooring, a generic court, knee pads and a uniform alone cannot identify one sport.
+Require sport-specific equipment, distinctive sporting action, a distinctive venue or
+legible sport-specific signage. Do not invent a net, ball or shuttlecock that is not visible.
+Choose scene_type independently before assigning the sport. Studio portraits, face closeups,
+ceremonies, casual photos and uncertain scenes always use 未分類, regardless of score.
+Give only short visible evidence, no names or personal information. score is your
 uncalibrated confidence from 0 to 1, not measured accuracy. Return one JSON object.
 """
 SCHEMA = {
@@ -43,8 +51,9 @@ SCHEMA = {
         "score": {"type": "NUMBER"},
         "evidence": {"type": "STRING"},
         "is_sport_context": {"type": "BOOLEAN"},
+        "scene_type": {"type": "STRING", "enum": ["sport_action", "sport_context", "studio_portrait", "face_closeup", "ceremony", "casual", "uncertain"]},
     },
-    "required": ["label", "score", "evidence", "is_sport_context"],
+    "required": ["label", "score", "evidence", "is_sport_context", "scene_type"],
 }
 
 
@@ -127,7 +136,7 @@ class BudgetLedger:
         incoming = _token_count(usage.get("promptTokenCount"))
         outgoing = _token_count(usage.get("candidatesTokenCount"))
         thoughts = _token_count(usage.get("thoughtsTokenCount", 0))
-        estimated = incoming * 100 + (outgoing + thoughts) * 400
+        estimated = incoming * INPUT_RATE + (outgoing + thoughts) * OUTPUT_RATE
         if incoming > INPUT_LIMIT or outgoing + thoughts > OUTPUT_LIMIT or estimated > RESERVATION:
             raise CloudRequestError("Reported usage exceeds the configured cost reservation")
         self.conn.execute("""UPDATE requests SET status='success',estimated=?,input_tokens=?,
@@ -202,15 +211,18 @@ def parse_prediction(response: dict, threshold: float = 0.85) -> Prediction:
     parts = candidates[0].get("content", {}).get("parts", [])
     text = "".join(part.get("text", "") for part in parts if not part.get("thought"))
     result = json.loads(text)
-    if not isinstance(result, dict) or set(result) != {"label", "score", "evidence", "is_sport_context"}:
+    if not isinstance(result, dict) or set(result) != {"label", "score", "evidence", "is_sport_context", "scene_type"}:
         raise CloudRequestError("Invalid classification fields")
     label, score, evidence, context = (result[k] for k in ("label", "score", "evidence", "is_sport_context"))
     if label not in LABELS or type(score) not in (int, float) or not math.isfinite(score) or not 0 <= score <= 1:
         raise CloudRequestError("Invalid classification label or score")
     if not isinstance(evidence, str) or len(evidence) > 2000 or type(context) is not bool:
         raise CloudRequestError("Invalid classification evidence or scene flag")
-    raw.update({"proposed_label": label, "is_sport_context": context, "threshold": threshold})
-    accepted = context and score >= threshold
+    scene = result["scene_type"]
+    if scene not in SCHEMA["properties"]["scene_type"]["enum"]:
+        raise CloudRequestError("Invalid scene type")
+    raw.update({"proposed_label": label, "is_sport_context": context, "scene_type": scene, "threshold": threshold})
+    accepted = context and scene in {"sport_action", "sport_context"} and score >= threshold
     return Prediction(label if accepted else "未分類", float(score), evidence, raw)
 
 
@@ -240,7 +252,7 @@ class GeminiEngine:
                 {"text": PROMPT}, {"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(image).decode("ascii")}},
             ]}],
             "generationConfig": {"temperature": 0, "candidateCount": 1, "maxOutputTokens": OUTPUT_LIMIT,
-                                 "thinkingConfig": {"thinkingBudget": 0},
+                                 "thinkingConfig": {"thinkingLevel": "MINIMAL"},
                                  "responseMimeType": "application/json", "responseSchema": SCHEMA},
         }
         try:

@@ -14,14 +14,19 @@ from sports_sorter.cloud import (
 )
 
 
-def response(label="テニス", score=0.95, context=True):
+def response(label="テニス", score=0.95, context=True, scene="sport_action"):
     result = {"label": label, "score": score, "is_sport_context": context,
-              "evidence": "Visible racket, ball and tennis court during play"}
+              "evidence": "Visible racket, ball and tennis court during play", "scene_type": scene}
     return {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": json.dumps(result)}]}}],
             "usageMetadata": {"promptTokenCount": 500, "candidatesTokenCount": 80}}
 
 
 class CloudTests(unittest.TestCase):
+    def test_excluded_scene_overrides_confident_sport(self):
+        result = parse_prediction(response(score=0.99, context=True, scene="studio_portrait"))
+        self.assertEqual(result.label, "未分類")
+        self.assertEqual(result.raw["proposed_label"], "テニス")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name).resolve() / "budget.sqlite"
@@ -75,7 +80,7 @@ class CloudTests(unittest.TestCase):
         self.assertNotIn("image_path", payload_text)
         summary = self.ledger.summary()
         self.assertEqual(summary["reserved_usd"], RESERVATION / NANODOLLARS)
-        self.assertEqual(summary["estimated_successful_charge_usd"], (500 * 100 + 80 * 400) / NANODOLLARS)
+        self.assertEqual(summary["estimated_successful_charge_usd"], (500 * 300 + 80 * 2500) / NANODOLLARS)
         stored = self.ledger.conn.execute("SELECT prediction FROM requests").fetchone()[0]
         self.assertNotIn(encoded, stored)
         self.assertNotIn("synthetic-key", stored)

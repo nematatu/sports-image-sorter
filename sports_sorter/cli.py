@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 from .core import (LABELS, Database, classify, copy_images, duplicates, export_json,
-                   scan, set_reviews, summary, verify)
+                   scan, set_reviews, summary, verify, protected_path, _outside_source)
 from .engines import load_engine
 
 
@@ -39,6 +39,8 @@ def main(argv=None):
     serving.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
     try:
+        if args.action == "scan":
+            _outside_source(protected_path(args.db), protected_path(args.source))
         with Database(args.db) as db:
             if args.action == "scan":
                 result = scan(args.source, db)

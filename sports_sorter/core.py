@@ -210,7 +210,9 @@ def scan(source: str | Path, db: Database) -> dict:
             db.conn.execute("""INSERT INTO images
                 (relpath,sha256,size,mtime_ns,decode_status,decode_error,width,height,phash,present)
                 VALUES (?,?,?,?,?,?,?,?,?,1)
-                ON CONFLICT(relpath) DO UPDATE SET present=1""", item)
+                ON CONFLICT(relpath) DO UPDATE SET present=1,
+                decode_status=excluded.decode_status,decode_error=excluded.decode_error,
+                width=excluded.width,height=excluded.height,phash=excluded.phash""", item)
     return {"images": len(scanned), "decodable": sum(item[4] == "ok" for item in scanned),
             "decode_errors": sum(item[4] == "error" for item in scanned),
             "formats": dict(Counter(Path(item[0]).suffix.lower() for item in scanned))}
@@ -424,7 +426,8 @@ def duplicates(db: Database, max_distance: int = 4, max_pairs: int = 1000) -> di
 def summary(db: Database, engine_key: str | None = None) -> dict:
     rows = effective_rows(db, engine_key)
     counts = Counter(row["label"] for row in rows)
-    gold = [row for row in rows if row["human_verified"] and row["prediction_label"] is not None]
+    reviewed = [row for row in rows if row["human_verified"]]
+    gold = [row for row in reviewed if row["prediction_label"] is not None and row["error"] is None]
     correct = sum(row["prediction_label"] == row["review_label"] for row in gold)
     return {"images": len(rows), "classified": sum(value for key, value in counts.items() if key != "未分類"),
             "unclassified": counts.get("未分類", 0), "by_label": dict(counts),
@@ -433,6 +436,8 @@ def summary(db: Database, engine_key: str | None = None) -> dict:
             "inference_errors": sum(row["error"] is not None for row in rows),
             "disagreements": sum(bool(row["disagreement"]) for row in rows),
             "accuracy": {"human_verified_samples": len(gold), "correct": correct,
+                         "human_reviewed_total": len(reviewed),
+                         "reviewed_inference_failures": sum(row["error"] is not None for row in reviewed),
                          "coverage": len(gold) / len(rows) if rows else 0,
                          "value": correct / len(gold) if gold else None,
                          "note": "Accuracy is unavailable without independently human-verified labels" if not gold else "Accuracy on reviewed sample only; selection bias may apply"}}
@@ -441,7 +446,11 @@ def summary(db: Database, engine_key: str | None = None) -> dict:
 def export_json(db: Database, path: str | Path) -> dict:
     target = protected_path(path)
     _outside_source(target, db.source)
-    data = {"schema_version": 1, "summary": summary(db), "images": effective_rows(db), "duplicates": duplicates(db)}
+    rows = effective_rows(db)
+    data = {"schema_version": 1, "summary": summary(db), "source": str(db.source),
+            "images": rows, "duplicates": duplicates(db),
+            "predictions": {str(row["id"]): get_predictions(db, row["id"]) for row in rows},
+            "copies": [dict(row) for row in db.conn.execute("SELECT * FROM copies ORDER BY id")]}
     with target.open("x", encoding="utf-8") as output:
         json.dump(data, output, ensure_ascii=False, indent=2)
     return {"exported_images": len(data["images"])}
