@@ -63,7 +63,8 @@ def main(argv=None):
                 serve(db.path, port=args.port)
                 return 0
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 1 if args.action == "verify" and not result["ok"] else 0
+        failed = (args.action == "verify" and not result["ok"]) or (args.action == "classify" and result.get("errors", 0) > 0)
+        return 1 if failed else 0
     except (OSError, ValueError, RuntimeError) as error:
         print(f"Error ({type(error).__name__}): {error}", file=sys.stderr)
         return 2

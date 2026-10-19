@@ -28,6 +28,14 @@ class FixedEngine:
 
 
 class CoreTests(unittest.TestCase):
+    def test_cli_reports_inference_failure_to_automation(self):
+        from sports_sorter.cli import main
+        self.image()
+        scan(self.source, self.db)
+        engine = FixedEngine()
+        with patch("sports_sorter.cli.load_engine", return_value=engine), patch.object(engine, "classify", side_effect=TimeoutError):
+            self.assertEqual(main(["--db", str(self.db.path), "classify"]), 1)
+
     def test_cli_rejects_database_inside_input_before_creation(self):
         from sports_sorter.cli import main
         path = self.source / "state.sqlite"
