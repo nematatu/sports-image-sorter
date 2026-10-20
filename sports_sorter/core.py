@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -13,6 +12,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from PIL import Image, ImageOps
+
+from .files import _outside_source, _read_file, protected_path, safe_source_file, sha256_file
+from .reconcile import build_output_plan, copy_images, verify
 
 LABELS = (
     "バドミントン", "テニス", "バレーボール", "バスケットボール", "陸上競技",
@@ -34,38 +36,6 @@ class Prediction:
 class Engine(Protocol):
     fingerprint: str
     def classify(self, pixels: Image.Image) -> Prediction: ...
-
-
-def protected_path(value: str | Path) -> Path:
-    path = Path(os.path.abspath(Path(value).expanduser()))
-    banned = Path.home() / "Downloads"
-    if path == banned or banned in path.parents:
-        raise ValueError("Access to Downloads is forbidden")
-    for part in reversed((path, *path.parents)):
-        if part.is_symlink():
-            raise ValueError("Symbolic links are forbidden")
-    return path
-
-
-def _outside_source(path: Path, source: Path) -> None:
-    if path == source or source in path.parents or path in source.parents:
-        raise ValueError("State/output and source must not overlap")
-
-
-def _read_file(path: Path):
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        os.close(fd)
-        raise ValueError("Expected a regular file")
-    return os.fdopen(fd, "rb")
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with _read_file(protected_path(path)) as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def load_pixels(path: Path) -> Image.Image:
@@ -141,16 +111,6 @@ class Database:
 
     def __exit__(self, *args):
         self.close()
-
-
-def safe_source_file(db: Database, row: dict | sqlite3.Row) -> Path:
-    relpath = Path(row["relpath"])
-    if relpath.is_absolute() or ".." in relpath.parts:
-        raise ValueError("Invalid source relative path")
-    path = protected_path(db.source / relpath)
-    if not path.is_file():
-        raise FileNotFoundError("Source file unavailable")
-    return path
 
 
 def _error_name(error: Exception) -> str:
@@ -290,115 +250,6 @@ def set_reviews(db: Database, image_ids: list[int], label: str, evidence: str = 
     return len(unique)
 
 
-def _target(output: Path, relative: str) -> Path:
-    part = Path(relative)
-    if part.is_absolute() or ".." in part.parts:
-        raise ValueError("Invalid output relative path")
-    return protected_path(output / part)
-
-
-def copy_images(db: Database, output: str | Path, engine_key: str | None = None, dry_run: bool = False) -> dict:
-    root = protected_path(output)
-    _outside_source(root, db.source)
-    if db.path == root or db.path in root.parents or root in db.path.parents:
-        raise ValueError("Output and state database must not overlap")
-    counts = Counter()
-    for row in effective_rows(db, engine_key):
-        source = safe_source_file(db, row)
-        if sha256_file(source) != row["sha256"]:
-            raise ValueError("Source changed since scan; copying stopped")
-        label = row["label"]
-        previous = db.conn.execute("SELECT * FROM copies WHERE image_id=? AND label=? AND output_root=? ORDER BY id", (row["id"], label, str(root))).fetchall()
-        verified = False
-        for copy in previous:
-            target = _target(root, copy["target_relpath"])
-            if target.exists():
-                if sha256_file(target) != row["sha256"]:
-                    if copy["status"] == "complete":
-                        raise ValueError("A recorded output copy is damaged; no overwrite performed")
-                    continue
-                if copy["status"] != "complete" and not dry_run:
-                    with db.conn:
-                        db.conn.execute("UPDATE copies SET status='complete' WHERE id=?", (copy["id"],))
-                verified = True
-                break
-        if verified:
-            counts["existing_verified"] += 1
-            continue
-        if dry_run:
-            counts["would_copy"] += 1
-            continue
-        folder = protected_path(root / label)
-        folder.mkdir(parents=True, exist_ok=True)
-        suffix = source.suffix.lower()
-        stem = source.stem
-        serial = 0
-        while True:
-            name = f"{stem}{'' if serial == 0 else '__' + str(row['id']) + '_' + str(serial)}{suffix}"
-            target = protected_path(folder / name)
-            relative = target.relative_to(root).as_posix()
-            if not target.exists() and db.conn.execute("SELECT 1 FROM copies WHERE output_root=? AND target_relpath=?", (str(root), relative)).fetchone() is None:
-                break
-            serial += 1
-        with db.conn:
-            cursor = db.conn.execute("INSERT INTO copies (image_id,label,output_root,target_relpath,sha256,status) VALUES (?,?,?,?,?,'pending')", (row["id"], label, str(root), relative, row["sha256"]))
-            copy_id = cursor.lastrowid
-        digest = hashlib.sha256()
-        try:
-            with _read_file(source) as incoming, target.open("xb") as outgoing:
-                for block in iter(lambda: incoming.read(1024 * 1024), b""):
-                    outgoing.write(block)
-                    digest.update(block)
-                outgoing.flush()
-                os.fsync(outgoing.fileno())
-            if digest.hexdigest() != row["sha256"] or sha256_file(target) != row["sha256"] or sha256_file(source) != row["sha256"]:
-                raise ValueError("Copy/source integrity check failed")
-        except BaseException:
-            # Keep partial files as evidence. A retry selects a fresh exclusive path.
-            with db.conn:
-                db.conn.execute("UPDATE copies SET status='interrupted' WHERE id=?", (copy_id,))
-            raise
-        with db.conn:
-            db.conn.execute("UPDATE copies SET status='complete' WHERE id=?", (copy_id,))
-        counts["copied"] += 1
-    return dict(counts)
-
-
-def verify(db: Database, output: str | Path, engine_key: str | None = None) -> dict:
-    root = protected_path(output)
-    _outside_source(root, db.source)
-    counts = Counter()
-    problems = []
-    rows = effective_rows(db, engine_key)
-    for row in rows:
-        try:
-            source = safe_source_file(db, row)
-            current = source.stat()
-            intact = sha256_file(source) == row["sha256"] and current.st_size == row["size"] and current.st_mtime_ns == row["mtime_ns"]
-        except (OSError, ValueError):
-            intact = False
-        counts["originals_unchanged" if intact else "originals_changed_or_missing"] += 1
-        copies = db.conn.execute("SELECT * FROM copies WHERE image_id=? AND output_root=?", (row["id"], str(root))).fetchall()
-        valid = False
-        for copy in copies:
-            if copy["label"] != row["label"]:
-                counts["stale_copies"] += 1
-                continue
-            try:
-                matches = sha256_file(_target(root, copy["target_relpath"])) == row["sha256"]
-            except (OSError, ValueError):
-                matches = False
-            if matches:
-                valid = True
-                counts["verified_copies"] += 1
-            else:
-                counts["damaged_or_missing_copies"] += 1
-        if not intact or not valid:
-            problems.append(row["id"])
-        counts["covered_images" if valid else "missing_images"] += 1
-    return {"ok": not problems, "images": len(rows), **dict(counts), "problem_image_ids": problems}
-
-
 def duplicates(db: Database, max_distance: int = 4, max_pairs: int = 1000) -> dict:
     rows = effective_rows(db)
     exact = defaultdict(list)
@@ -450,7 +301,8 @@ def export_json(db: Database, path: str | Path) -> dict:
     data = {"schema_version": 1, "summary": summary(db), "source": str(db.source),
             "images": rows, "duplicates": duplicates(db),
             "predictions": {str(row["id"]): get_predictions(db, row["id"]) for row in rows},
-            "copies": [dict(row) for row in db.conn.execute("SELECT * FROM copies ORDER BY id")]}
+            "copies": [dict(row) for row in db.conn.execute("SELECT * FROM copies ORDER BY id")],
+            "output_plan": build_output_plan(rows).describe()}
     with target.open("x", encoding="utf-8") as output:
         json.dump(data, output, ensure_ascii=False, indent=2)
     return {"exported_images": len(data["images"])}

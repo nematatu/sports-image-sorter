@@ -94,9 +94,11 @@ class CoreTests(unittest.TestCase):
         self.output.joinpath("テニス").mkdir(parents=True)
         collision = self.output / "テニス" / "one.png"
         collision.write_bytes(b"preexisting")
-        self.assertEqual(copy_images(self.db, self.output), {"copied": 1})
-        self.assertEqual(collision.read_bytes(), b"preexisting")
-        self.assertEqual(copy_images(self.db, self.output), {"existing_verified": 1})
+        result = copy_images(self.db, self.output)
+        self.assertEqual(result["copied"], 1)
+        self.assertEqual((Path(result["archive"]) / "テニス" / "one.png").read_bytes(), b"preexisting")
+        self.assertFalse(collision.exists())
+        self.assertEqual(copy_images(self.db, self.output)["existing_verified"], 1)
         result = verify(self.db, self.output)
         self.assertTrue(result["ok"])
         self.assertEqual(result["originals_unchanged"], 1)
@@ -105,7 +107,7 @@ class CoreTests(unittest.TestCase):
 
     def test_dry_run_creates_no_output(self):
         self.prepare()
-        self.assertEqual(copy_images(self.db, self.output, dry_run=True), {"would_copy": 1})
+        self.assertEqual(copy_images(self.db, self.output, dry_run=True)["would_copy"], 1)
         self.assertFalse(self.output.exists())
         self.assertEqual(self.db.conn.execute("SELECT COUNT(*) FROM copies").fetchone()[0], 0)
 
@@ -151,17 +153,18 @@ class CoreTests(unittest.TestCase):
             scan(self.source, self.db)
         self.assertFalse(verify(self.db, self.output)["ok"])
 
-    def test_damaged_completed_copy_stops_without_overwrite(self):
+    def test_damaged_completed_copy_is_preserved_and_repaired(self):
         self.prepare()
         copy_images(self.db, self.output)
         target = self.output / "テニス" / "one.png"
         target.write_bytes(b"damaged")
-        with self.assertRaises(ValueError):
-            copy_images(self.db, self.output)
-        self.assertEqual(target.read_bytes(), b"damaged")
         self.assertFalse(verify(self.db, self.output)["ok"])
+        result = copy_images(self.db, self.output)
+        self.assertEqual((Path(result["archive"]) / "テニス" / "one.png").read_bytes(), b"damaged")
+        self.assertFalse(target.exists())
+        self.assertTrue(verify(self.db, self.output)["ok"])
 
-    def test_interrupted_partial_copy_kept_and_retried_to_new_path(self):
+    def test_interrupted_partial_copy_is_archived_after_repair(self):
         self.prepare()
         target = self.output / "テニス" / "one.png"
         target.parent.mkdir(parents=True)
@@ -169,21 +172,23 @@ class CoreTests(unittest.TestCase):
         row = effective_rows(self.db)[0]
         with self.db.conn:
             self.db.conn.execute("INSERT INTO copies (image_id,label,output_root,target_relpath,sha256,status) VALUES (?,?,?,?,?,'interrupted')", (row["id"], "テニス", str(self.output), "テニス/one.png", row["sha256"]))
-        self.assertEqual(copy_images(self.db, self.output), {"copied": 1})
-        self.assertEqual(target.read_bytes(), b"partial")
+        result = copy_images(self.db, self.output)
+        self.assertEqual(result["copied"], 1)
+        self.assertEqual((Path(result["archive"]) / "テニス" / "one.png").read_bytes(), b"partial")
+        self.assertFalse(target.exists())
         result = verify(self.db, self.output)
         self.assertTrue(result["ok"])
-        self.assertEqual(result["damaged_or_missing_copies"], 1)
+        self.assertEqual(result["unexpected_files"], [])
 
     def test_interrupted_complete_copy_recovered(self):
         self.prepare()
         copy_images(self.db, self.output)
         with self.db.conn:
             self.db.conn.execute("UPDATE copies SET status='pending'")
-        self.assertEqual(copy_images(self.db, self.output), {"existing_verified": 1})
+        self.assertEqual(copy_images(self.db, self.output)["existing_verified"], 1)
         self.assertEqual(self.db.conn.execute("SELECT status FROM copies").fetchone()[0], "complete")
 
-    def test_review_provenance_accuracy_and_stale_copies(self):
+    def test_review_provenance_accuracy_and_archived_copies(self):
         self.prepare()
         copy_images(self.db, self.output)
         image_id = effective_rows(self.db)[0]["id"]
@@ -193,11 +198,12 @@ class CoreTests(unittest.TestCase):
         accuracy = summary(self.db)["accuracy"]
         self.assertEqual(accuracy["human_verified_samples"], 1)
         self.assertEqual(accuracy["value"], 0)
-        copy_images(self.db, self.output)
+        copied = copy_images(self.db, self.output)
         result = verify(self.db, self.output)
         self.assertTrue(result["ok"])
-        self.assertEqual(result["stale_copies"], 1)
-        self.assertTrue((self.output / "テニス" / "one.png").exists())
+        self.assertEqual(copied["archived"], 1)
+        self.assertFalse((self.output / "テニス" / "one.png").exists())
+        self.assertTrue((Path(copied["archive"]) / "テニス" / "one.png").exists())
 
     def test_reviews_transaction_and_validation(self):
         self.prepare()
@@ -208,13 +214,14 @@ class CoreTests(unittest.TestCase):
             set_reviews(self.db, [image_id, 9999999], "テニス")
         self.assertIsNone(effective_rows(self.db)[0]["review_label"])
 
-    def test_duplicate_files_remain_separate_and_copy_every_path(self):
+    def test_duplicate_sources_are_preserved_and_share_one_copy(self):
         original = self.image()
         shutil.copyfile(original, self.source / "two.png")
         scan(self.source, self.db)
         classify(self.db, FixedEngine())
         self.assertEqual(len(duplicates(self.db)["exact"][0]), 2)
-        self.assertEqual(copy_images(self.db, self.output)["copied"], 2)
+        self.assertEqual(copy_images(self.db, self.output)["copied"], 1)
+        self.assertEqual(len(list(self.source.glob("*.png"))), 2)
         self.assertEqual(verify(self.db, self.output)["covered_images"], 2)
 
     def test_export_does_not_overwrite(self):
