@@ -37,6 +37,20 @@ class PublicationTests(unittest.TestCase):
         self.git("add", "runtime.json")
         self.assertEqual(self.audit().returncode, 1)
 
+    def test_renovate_configuration_on_another_branch_passes(self):
+        self.git("checkout", "-b", "renovate/configure")
+        (self.root / "renovate.json").write_text('{"extends": ["config:recommended"]}\n')
+        self.git("add", "renovate.json")
+        self.commit()
+        self.git("checkout", "main")
+        self.assertEqual(self.audit().returncode, 0)
+
+    def test_renovate_configuration_still_rejects_private_data(self):
+        private = "/" + "Users/" + "synthetic/private-file"
+        (self.root / "renovate.json").write_text('{"synthetic": "' + private + '"}')
+        self.git("add", "renovate.json")
+        self.assertEqual(self.audit().returncode, 1)
+
     def test_deleted_private_path_remains_rejected_in_history(self):
         private = "/" + "Users/" + "synthetic/private-file"
         (self.root / "old.md").write_text(private)
