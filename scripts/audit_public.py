@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 
 ALLOWED_SUFFIXES = {".py", ".swift", ".md", ".toml", ".yml", ".yaml", ".html", ".css", ".js"}
 ALLOWED_NAMES = {".gitignore", ".env.example", "LICENSE"}
+ALLOWED_CONFIG_PATHS = {"renovate.json"}
 PATTERNS = [
     rb"/" + rb"Users/[^\s/]+/",
     rb"/" + rb"home/[^\s/]+/",
@@ -33,7 +34,7 @@ def audit():
             return
         checked.add(key)
         path = PurePosixPath(name)
-        if path.name not in ALLOWED_NAMES and path.suffix not in ALLOWED_SUFFIXES:
+        if name not in ALLOWED_CONFIG_PATHS and path.name not in ALLOWED_NAMES and path.suffix not in ALLOWED_SUFFIXES:
             errors.append(f"{location}: 公開許可外のファイル形式 {name}")
         if any(part in {"runtime", "private", ".audit", ".venv"} for part in path.parts):
             errors.append(f"{location}: 非公開ディレクトリ {name}")
